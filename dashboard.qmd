@@ -1,0 +1,505 @@
+---
+title: "Esprit de Corps — Monitor"
+format:
+  dashboard:
+    theme: [darkly, custom.scss]
+    orientation: rows
+execute:
+  echo: false
+  warning: false
+  message: false
+---
+
+```{r setup}
+#| include: false
+
+library(googlesheets4)
+library(dplyr)
+library(tidyr)
+library(lubridate)
+library(ggplot2)
+library(scales)
+library(patchwork)
+library(jsonlite)
+library(knitr)
+library(purrr)
+
+# ── Config ────────────────────────────────────────────────────────────────────
+SHEET_ID    <- "1zoCyTX7alZ0V5YzpVLN9Qd2iIWrX1KYJx07065n_NFc"
+POWER_SHEET <- "Power Log"
+PUMP_SHEET  <- "Bilge Pump Log"
+LAT         <- 41.57
+LON         <- -71.45
+TZ          <- "America/New_York"
+RAIN_THRESH <- 0.01
+ACR_COMBINE    <- 13.0
+ACR_DISCONNECT <- 12.75
+CONVERGE_TOL   <- 0.15
+
+# ── Palette ───────────────────────────────────────────────────────────────────
+C <- list(
+  bg = "#0d1b2a", panel = "#152238", grid = "#1e3a5a",
+  text = "#e0e8f0", muted = "#90a4ae", blue = "#2196F3",
+  rain = "#1976D2", cycle = "#ff7043", green = "#4caf50",
+  dryday = "#263850", line = "#546e7a"
+)
+
+# ── Load pump data ────────────────────────────────────────────────────────────
+gs4_deauth()
+
+pump_raw <- tryCatch({
+  raw <- read_sheet(SHEET_ID, sheet = PUMP_SHEET)
+  names(raw) <- c("date", "start_t", "end_t", "duration")
+  raw |>
+    mutate(
+      date     = as.Date(format(date, "%Y-%m-%d")),
+      start_t  = format(start_t, "%H:%M:%S"),
+      end_t    = format(end_t,   "%H:%M:%S"),
+      duration = as.numeric(duration)
+    ) |>
+    filter(!is.na(date))
+}, error = function(e) {
+  tibble(date = as.Date(character()), start_t = character(),
+         end_t = character(), duration = numeric())
+})
+
+# ── Load power data ───────────────────────────────────────────────────────────
+power_raw <- tryCatch({
+  raw <- read_sheet(SHEET_ID, sheet = POWER_SHEET)
+  names(raw) <- c("timestamp", "voltage", "current", "soc",
+                  "consumed_ah", "time_to_go", "starter_v")
+  raw |>
+    mutate(
+      timestamp   = suppressWarnings(as_datetime(as.character(timestamp), tz = TZ)),
+      voltage     = as.numeric(voltage),
+      current     = as.numeric(current),
+      soc         = as.numeric(soc),
+      consumed_ah = as.numeric(consumed_ah),
+      time_to_go  = as.numeric(time_to_go),
+      starter_v   = as.numeric(starter_v)
+    ) |>
+    filter(!is.na(timestamp)) |>
+    arrange(timestamp)
+}, error = function(e) {
+  tibble(timestamp = as.POSIXct(character()), voltage = numeric(),
+         current = numeric(), soc = numeric(), consumed_ah = numeric(),
+         time_to_go = numeric(), starter_v = numeric())
+})
+
+# ── Load rainfall ─────────────────────────────────────────────────────────────
+weather <- tryCatch({
+  if (nrow(pump_raw) > 0) {
+    url <- paste0(
+      "https://api.open-meteo.com/v1/forecast",
+      "?latitude=", LAT, "&longitude=", LON,
+      "&daily=precipitation_sum&precipitation_unit=inch",
+      "&past_days=92&forecast_days=0&timezone=", URLencode(TZ)
+    )
+    r <- fromJSON(url)
+    tibble(date = as.Date(r$daily$time),
+           rainfall_in = replace_na(r$daily$precipitation_sum, 0))
+  } else NULL
+}, error = function(e) NULL)
+
+# ── Daily pump summary + rain join ────────────────────────────────────────────
+daily <- NULL
+if (nrow(pump_raw) > 0) {
+  date_seq <- seq(min(pump_raw$date), Sys.Date(), by = "day")
+  daily <- pump_raw |>
+    group_by(date) |>
+    summarise(cycles = n(),
+              avg_dur_s = mean(duration, na.rm = TRUE), .groups = "drop") |>
+    right_join(tibble(date = date_seq), by = "date") |>
+    mutate(cycles = replace_na(cycles, 0L)) |>
+    arrange(date)
+  if (!is.null(weather)) {
+    daily <- daily |>
+      left_join(weather, by = "date") |>
+      mutate(rainfall_in = replace_na(rainfall_in, 0),
+             is_rain_day = rainfall_in >= RAIN_THRESH)
+  }
+}
+
+# ── Theme ─────────────────────────────────────────────────────────────────────
+plot_theme <- theme_minimal(base_size = 13) +
+  theme(
+    plot.background  = element_rect(fill = C$bg, color = NA),
+    panel.background = element_rect(fill = C$panel, color = NA),
+    panel.grid.major = element_line(color = C$grid, linewidth = 0.4),
+    panel.grid.minor = element_blank(),
+    text = element_text(color = C$text),
+    axis.text = element_text(color = C$muted),
+    axis.title = element_text(color = C$muted),
+    plot.title = element_text(color = C$text, face = "bold"),
+    plot.subtitle = element_text(color = C$muted, size = rel(0.85)),
+    legend.text = element_text(color = C$muted),
+    legend.position = "top"
+  )
+
+# ── Helper: latest power row ──────────────────────────────────────────────────
+latest_power <- if (nrow(power_raw) > 0) slice_tail(power_raw, n = 1) else NULL
+
+# ── Helper: value-box formatting ──────────────────────────────────────────────
+fmt <- function(x, suffix = "", digits = 0, na = "\u2014") {
+  if (is.null(x) || length(x) == 0 || is.na(x)) return(na)
+  paste0(formatC(x, format = "f", digits = digits, big.mark = ","), suffix)
+}
+
+# ── Leakage rate + sparkline data (rolling regression per rain event) ─────────
+leak_rate    <- NA_real_
+leak_spark   <- NULL
+if (!is.null(daily) && "is_rain_day" %in% names(daily)) {
+  rd <- daily |> filter(is_rain_day %in% TRUE) |> arrange(date)
+  if (nrow(rd) >= 2) {
+    leak_rate <- coef(lm(cycles ~ rainfall_in, data = rd))[2]
+    # Sparkline: cumulative leakage-rate estimate as each rain event is added
+    leak_spark <- purrr::map_dbl(2:nrow(rd), function(i) {
+      coef(lm(cycles ~ rainfall_in, data = rd[1:i, ]))[2]
+    })
+  }
+}
+```
+
+# Overview
+
+## Row {height=22%}
+
+```{r}
+#| content: valuebox
+#| title: "State of Charge"
+list(
+  icon  = "battery-half",
+  color = "primary",
+  value = fmt(latest_power$soc, "%", 0)
+)
+```
+
+```{r}
+#| content: valuebox
+#| title: "House Voltage"
+list(
+  icon  = "lightning-charge",
+  color = "primary",
+  value = fmt(latest_power$voltage, "V", 2)
+)
+```
+
+```{r}
+#| content: valuebox
+#| title: "Starter Voltage"
+list(
+  icon  = "car-front",
+  color = "primary",
+  value = fmt(latest_power$starter_v, "V", 2)
+)
+```
+
+## Row {height=22%}
+
+```{r}
+#| content: valuebox
+#| title: "Bilge Runs (24h)"
+runs_24h <- if (nrow(pump_raw) > 0)
+  sum(pump_raw$date >= (Sys.Date() - 1)) else 0
+list(icon = "droplet", color = "info", value = runs_24h)
+```
+
+```{r}
+#| content: valuebox
+#| title: "Bilge Runs (7d)"
+runs_7d <- if (nrow(pump_raw) > 0)
+  sum(pump_raw$date >= (Sys.Date() - 6)) else 0
+list(icon = "droplet-fill", color = "info", value = runs_7d)
+```
+
+```{r}
+#| content: valuebox
+#| title: "Last Bilge Run"
+last_run <- if (nrow(pump_raw) > 0) {
+  r <- pump_raw |> arrange(date, start_t) |> slice_tail(n = 1)
+  paste0(format(r$date, "%b %d"), " ", substr(r$start_t, 1, 5))
+} else "\u2014"
+list(icon = "clock-history", color = "info", value = last_run)
+```
+
+## Row {height=56%}
+
+### Column {width=40%}
+
+::: {.card title="Leakage Rate Trend"}
+
+```{r}
+#| fig-height: 2.6
+#| fig-width: 5
+
+if (!is.na(leak_rate) && !is.null(leak_spark) && length(leak_spark) >= 2) {
+  spark_df <- tibble(x = seq_along(leak_spark), y = leak_spark)
+  trend_up <- tail(leak_spark, 1) >= leak_spark[1]
+  arrow_sym <- if (trend_up) "\u2191" else "\u2193"
+
+  ggplot(spark_df, aes(x, y)) +
+    geom_area(fill = C$green, alpha = 0.22) +
+    geom_line(color = C$green, linewidth = 0.9) +
+    annotate("text",
+             x = mean(range(spark_df$x)),
+             y = max(spark_df$y) * 1.02,
+             label = paste0(round(leak_rate, 1), " cyc/in ", arrow_sym),
+             color = C$green, size = 7, fontface = "bold") +
+    scale_y_continuous(expand = expansion(mult = c(0.1, 0.25))) +
+    theme_void() +
+    theme(plot.background = element_rect(fill = C$bg, color = NA),
+          plot.margin = margin(6, 6, 6, 6))
+} else {
+  ggplot() +
+    annotate("text", x = 0.5, y = 0.5,
+             label = "Need \u2265 2 rain events",
+             color = C$muted, size = 5) +
+    theme_void() +
+    theme(plot.background = element_rect(fill = C$bg, color = NA))
+}
+```
+
+Cycles per inch of rain. Rising trend indicates worsening bow ingress.
+
+:::
+
+### Column {width=60%}
+
+::: {.card title="Recent Bilge Activity"}
+
+```{r}
+if (nrow(pump_raw) > 0) {
+  pump_raw |>
+    arrange(desc(date), desc(start_t)) |>
+    slice_head(n = 8) |>
+    mutate(Duration = paste0(duration, "s")) |>
+    transmute(Date = format(date, "%b %d"),
+              Start = substr(start_t, 1, 8),
+              End = substr(end_t, 1, 8),
+              Duration) |>
+    kable()
+} else {
+  cat("No bilge events recorded yet.")
+}
+```
+
+:::
+
+# Bilge Pump
+
+## Row
+
+::: {.card title="Rainfall + Bilge Pump Cycles"}
+
+```{r}
+#| fig-height: 5
+#| fig-width: 12
+
+if (!is.null(daily) && nrow(daily) > 0 && "rainfall_in" %in% names(daily)) {
+  n <- nrow(daily)
+  brk <- if (n <= 14) "1 day" else if (n <= 60) "1 week" else "1 month"
+
+  p_rain <- ggplot(daily, aes(date)) +
+    geom_col(aes(y = rainfall_in,
+                 fill = if_else(is_rain_day, "Rain", "Dry")),
+             width = 0.7, alpha = 0.9) +
+    scale_fill_manual(name = NULL,
+                      values = c("Rain" = C$rain, "Dry" = C$dryday)) +
+    scale_x_date(date_labels = "%b %d", date_breaks = brk) +
+    scale_y_continuous(expand = expansion(mult = c(0, 0.1))) +
+    labs(title = "Rainfall + Bilge Pump Cycles",
+         subtitle = "Blue = rain \u2022 Orange = pump cycles \u2022 \u2715 = dry day / no cycles",
+         y = "Rain (in)", x = NULL) +
+    plot_theme +
+    theme(axis.text.x = element_blank(), legend.position = "top")
+
+  p_cyc <- ggplot(daily, aes(date)) +
+    geom_col(data = filter(daily, cycles > 0), aes(y = cycles),
+             fill = C$cycle, width = 0.7) +
+    geom_point(data = filter(daily, cycles == 0), aes(y = 0),
+               shape = 3, color = C$muted, size = 2, alpha = 0.6) +
+    scale_x_date(date_labels = "%b %d", date_breaks = brk) +
+    scale_y_continuous(expand = expansion(mult = c(0, 0.15))) +
+    labs(y = "Cycles", x = NULL) +
+    plot_theme
+
+  p_rain / p_cyc + plot_layout(heights = c(2, 3))
+} else {
+  ggplot() + annotate("text", x = 0.5, y = 0.5,
+    label = "No bilge data yet", color = C$muted, size = 6) +
+    theme_void() +
+    theme(plot.background = element_rect(fill = C$bg, color = NA))
+}
+```
+
+:::
+
+## Row
+
+::: {.card title="Cycles vs. Rainfall"}
+
+```{r}
+#| fig-height: 4
+#| fig-width: 12
+
+if (!is.null(daily) && "is_rain_day" %in% names(daily)) {
+  rd <- daily |> filter(is_rain_day %in% TRUE)
+  if (nrow(rd) >= 2) {
+    fit <- lm(cycles ~ rainfall_in, data = rd)
+    ggplot(rd, aes(rainfall_in, cycles)) +
+      geom_smooth(method = "lm", color = C$green, fill = C$green,
+                  alpha = 0.15, linewidth = 0.8) +
+      geom_point(aes(color = as.numeric(date)), size = 4, alpha = 0.9) +
+      scale_color_gradient(low = C$line, high = C$cycle,
+        name = "Date",
+        labels = \(x) format(as.Date(x, origin = "1970-01-01"), "%b %d")) +
+      annotate("text", x = Inf, y = Inf,
+        label = paste0("Slope: ", round(coef(fit)[2], 1),
+                       " cyc/in\nR\u00b2 = ", round(summary(fit)$r.squared, 2)),
+        color = C$green, hjust = 1.05, vjust = 1.3, size = 4) +
+      labs(title = "Cycles vs. Rainfall (rain days only)",
+           subtitle = "Steepening slope \u2192 worsening ingress",
+           x = "Rainfall (inches)", y = "Pump cycles") +
+      plot_theme
+  } else {
+    ggplot() + annotate("text", x = 0.5, y = 0.5,
+      label = paste0("Need \u2265 2 rain events (", nrow(rd), " so far)"),
+      color = C$muted, size = 6) +
+      theme_void() +
+      theme(plot.background = element_rect(fill = C$bg, color = NA))
+  }
+}
+```
+
+:::
+
+# Power
+
+## Row
+
+::: {.card title="Battery Voltage — with ACR state"}
+
+```{r}
+#| fig-height: 4.5
+#| fig-width: 12
+
+if (nrow(power_raw) > 0) {
+  cutoff <- Sys.time() - 7 * 86400
+  d <- power_raw |> filter(timestamp >= cutoff)
+
+  # Infer combined state
+  d_state <- d |>
+    filter(!is.na(voltage), !is.na(starter_v)) |>
+    mutate(combined = abs(voltage - starter_v) <= CONVERGE_TOL &
+             voltage > ACR_DISCONNECT & starter_v > ACR_DISCONNECT)
+
+  shade <- NULL
+  if (any(d_state$combined)) {
+    r <- rle(d_state$combined)
+    ends <- cumsum(r$lengths); starts <- ends - r$lengths + 1
+    idx <- which(r$values)
+    shade <- tibble(xmin = d_state$timestamp[starts[idx]],
+                    xmax = d_state$timestamp[ends[idx]])
+  }
+
+  d_long <- d |>
+    select(timestamp, House = voltage, Starter = starter_v) |>
+    pivot_longer(-timestamp, names_to = "bank", values_to = "v") |>
+    filter(!is.na(v))
+
+  p <- ggplot()
+  if (!is.null(shade) && nrow(shade) > 0) {
+    p <- p + geom_rect(data = shade,
+      aes(xmin = xmin, xmax = xmax, ymin = -Inf, ymax = Inf),
+      fill = C$green, alpha = 0.10, inherit.aes = FALSE)
+  }
+  p +
+    geom_hline(yintercept = ACR_COMBINE, color = C$green,
+               linetype = "dashed", linewidth = 0.5, alpha = 0.8) +
+    geom_hline(yintercept = ACR_DISCONNECT, color = C$cycle,
+               linetype = "dashed", linewidth = 0.5, alpha = 0.8) +
+    annotate("text", x = min(d_long$timestamp), y = ACR_COMBINE,
+             label = paste0("ACR combine (", ACR_COMBINE, "V)"),
+             color = C$green, size = 3, hjust = 0, vjust = -0.4) +
+    annotate("text", x = min(d_long$timestamp), y = ACR_DISCONNECT,
+             label = paste0("ACR disconnect (", ACR_DISCONNECT, "V)"),
+             color = C$cycle, size = 3, hjust = 0, vjust = 1.3) +
+    geom_line(data = d_long, aes(timestamp, v, color = bank), linewidth = 0.7) +
+    scale_color_manual(name = NULL,
+                       values = c("House" = C$blue, "Starter" = C$cycle)) +
+    scale_x_datetime(date_labels = "%b %d", date_breaks = "1 day") +
+    labs(title = "Battery Voltage — last 7 days",
+         subtitle = "House vs. starter \u2022 shaded = ACR combined (inferred)",
+         x = NULL, y = "Volts") +
+    plot_theme
+} else {
+  ggplot() + annotate("text", x = 0.5, y = 0.5,
+    label = "No power data yet", color = C$muted, size = 6) +
+    theme_void() +
+    theme(plot.background = element_rect(fill = C$bg, color = NA))
+}
+```
+
+:::
+
+## Row {height=45%}
+
+### Column
+
+::: {.card title="State of Charge — 7 days"}
+
+```{r}
+#| fig-height: 3.5
+#| fig-width: 6
+
+if (nrow(power_raw) > 0) {
+  d <- power_raw |> filter(timestamp >= Sys.time() - 7*86400, !is.na(soc))
+  if (nrow(d) > 0) {
+    ggplot(d, aes(timestamp, soc)) +
+      geom_area(fill = C$blue, alpha = 0.18) +
+      geom_line(color = C$blue, linewidth = 0.8) +
+      scale_x_datetime(date_labels = "%b %d", date_breaks = "1 day") +
+      scale_y_continuous(limits = c(0, 100), breaks = seq(0, 100, 20)) +
+      labs(title = "State of Charge", x = NULL, y = "SOC (%)") +
+      plot_theme
+  }
+}
+```
+
+:::
+
+### Column
+
+::: {.card title="Current — 24 hours"}
+
+```{r}
+#| fig-height: 3.5
+#| fig-width: 6
+
+if (nrow(power_raw) > 0) {
+  d <- power_raw |> filter(timestamp >= Sys.time() - 24*3600, !is.na(current))
+  if (nrow(d) > 0) {
+    ggplot(d, aes(timestamp, current)) +
+      geom_hline(yintercept = 0, color = C$muted, linewidth = 0.5) +
+      geom_area(aes(fill = current >= 0), alpha = 0.15) +
+      geom_line(color = C$green, linewidth = 0.7) +
+      scale_fill_manual(values = c("TRUE" = C$green, "FALSE" = C$cycle),
+                        guide = "none") +
+      scale_x_datetime(date_labels = "%H:%M", date_breaks = "3 hours") +
+      labs(title = "Current", subtitle = "Positive = charging",
+           x = NULL, y = "Amps") +
+      plot_theme
+  }
+}
+```
+
+:::
+
+## Row {height=8%}
+
+```{r}
+#| content: valuebox
+#| title: "Last Updated"
+list(icon = "arrow-repeat", color = "secondary",
+     value = format(with_tz(Sys.time(), TZ), "%b %d %H:%M %Z"))
+```

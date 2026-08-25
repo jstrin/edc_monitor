@@ -1,0 +1,112 @@
+name: Render and Deploy Dashboard
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Schedule is UTC. Boat is in the water during EDT (UTC-4), so these are set
+# for EDT and will shift by one hour under EST — which is fine, boat is hauled
+# out by then.
+#
+# Desired local (EDT):
+#   Every 30 min, 9:00 AM – 6:00 PM  →  13:00–22:00 UTC
+#   Plus 10:00 PM EDT (02:00 UTC next day) and 6:00 AM EDT (10:00 UTC)
+# ─────────────────────────────────────────────────────────────────────────────
+
+on:
+  schedule:
+    # Every 30 min from 13:00 to 21:30 UTC (9:00 AM – 5:30 PM EDT)
+    - cron: "0,30 13-21 * * *"
+    # 22:00 UTC (6:00 PM EDT)
+    - cron: "0 22 * * *"
+    # 02:00 UTC (10:00 PM EDT)
+    - cron: "0 2 * * *"
+    # 10:00 UTC (6:00 AM EDT)
+    - cron: "0 10 * * *"
+  # Allow manual triggering from the Actions tab
+  workflow_dispatch:
+  # Render on push to main (so config changes deploy immediately)
+  push:
+    branches: [main]
+
+# Permissions needed for GitHub Pages deployment
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Prevent overlapping runs
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up R
+        uses: r-lib/actions/setup-r@v2
+        with:
+          use-public-rspm: true
+
+      - name: Set up Quarto
+        uses: quarto-dev/quarto-actions/setup@v2
+
+      # Cache installed R packages so subsequent runs are ~1 min not ~4 min
+      - name: Cache R packages
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.R_LIBS_USER }}
+          key: r-pkgs-${{ runner.os }}-${{ hashFiles('.github/workflows/render.yml') }}
+          restore-keys: r-pkgs-${{ runner.os }}-
+
+      - name: Install R package dependencies
+        uses: r-lib/actions/setup-r-dependencies@v2
+        with:
+          packages: |
+            any::googlesheets4
+            any::dplyr
+            any::tidyr
+            any::lubridate
+            any::ggplot2
+            any::scales
+            any::patchwork
+            any::jsonlite
+            any::knitr
+            any::purrr
+            any::rmarkdown
+
+      - name: Render dashboard
+        run: |
+          set -o pipefail
+          quarto render dashboard.qmd 2>&1 | tee /tmp/render.log
+
+      # If the render fails, surface the R/Quarto error on the run summary page
+      # so it can be read without expanding the raw job log.
+      - name: Publish render log on failure
+        if: failure()
+        run: |
+          {
+            echo '### Render failed'
+            echo '```'
+            tail -n 200 /tmp/render.log
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          # Quarto renders dashboard.qmd → dashboard.html.
+          # We publish the whole output dir; index redirect handles the root.
+          path: "."
+
+  deploy:
+    needs: render
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

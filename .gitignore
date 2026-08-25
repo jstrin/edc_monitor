@@ -1,0 +1,6 @@
+dashboard.html
+dashboard_files/
+.quarto/
+.Rhistory
+.Rproj.user/
+token.txt

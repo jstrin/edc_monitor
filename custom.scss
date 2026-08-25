@@ -1,0 +1,47 @@
+/*-- scss:defaults --*/
+
+$body-bg:        #0d1b2a;
+$body-color:     #e0e8f0;
+$primary:        #2196F3;
+$secondary:      #546e7a;
+$info:           #1976D2;
+
+/*-- scss:rules --*/
+
+.quarto-dashboard .card {
+  background-color: #152238;
+  border: 1px solid #1e3a5a;
+}
+
+.quarto-dashboard .card-header {
+  background-color: #1e3a5a;
+  color: #e0e8f0;
+  font-size: 0.9rem;
+}
+
+// Value boxes
+.quarto-dashboard .valuebox-grid .value-box-value {
+  font-size: 1.8rem;
+  font-weight: 700;
+}
+
+.quarto-dashboard .valuebox-grid .value-box-title {
+  font-size: 0.8rem;
+  color: #90a4ae;
+}
+
+// Navigation
+.quarto-dashboard .navbar {
+  background-color: #1c3a5e !important;
+}
+
+// Tables
+.quarto-dashboard table {
+  color: #e0e8f0;
+  font-size: 0.85rem;
+}
+
+.quarto-dashboard table thead th {
+  color: #e0e8f0;
+  border-bottom: 1px solid #1e3a5a;
+}
