@@ -31,7 +31,10 @@ $info:           #1976D2;
 
 .quarto-dashboard .bslib-value-box .value-box-title {
   font-size: clamp(0.62rem, 1.1vh + 0.32rem, 0.82rem);
-  color: rgba(255, 255, 255, 0.88);
+  // No hard-coded colour: the tiles change background with the reading, and
+  // bslib picks a contrast-appropriate foreground per background. Forcing
+  // white here would be unreadable on the amber "warning" tile.
+  opacity: 0.85;
   line-height: 1.2;
   margin: 0 0 0.1rem 0;
 }

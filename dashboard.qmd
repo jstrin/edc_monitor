@@ -154,6 +154,47 @@ fmt <- function(x, suffix = "", digits = 0, na = "\u2014") {
   paste0(formatC(x, format = "f", digits = digits, big.mark = ","), suffix)
 }
 
+# ── Value-box colour bands ────────────────────────────────────────────────────
+# Higher-is-better readings (state of charge, both battery voltages).
+band_hi <- function(x, good, ok) {
+  if (is.null(x) || length(x) == 0 || is.na(x)) return("secondary")
+  if (x >= good) "success" else if (x >= ok) "warning" else "danger"
+}
+
+# Bilge counts are judged against this boat's own trailing daily average — a
+# fixed threshold would be meaningless, since "normal" depends on the hull.
+base_rate <- if (!is.null(daily) && nrow(daily) >= 14)
+  mean(tail(daily$cycles, 30), na.rm = TRUE) else NA_real_
+
+band_runs <- function(n, days = 1) {
+  if (length(n) == 0 || is.na(n) || n == 0) return("secondary")
+  if (is.na(base_rate) || base_rate <= 0) return("info")
+  expected <- base_rate * days
+  if (n > max(3 * expected, 5 * days)) "danger"
+  else if (n > max(2 * expected, 3 * days)) "warning"
+  else "info"
+}
+
+# ── Elapsed time since the last bilge cycle ───────────────────────────────────
+# Exact timestamps stay in the "Recent Bilge Activity" table below; this tile
+# answers "how long has it been?" without the reader doing date arithmetic.
+last_run_lbl <- "\u2014"
+if (nrow(pump_raw) > 0) {
+  .r  <- pump_raw |> arrange(date, start_t) |> slice_tail(n = 1)
+  .ts <- suppressWarnings(as.POSIXct(paste(.r$date, .r$start_t), tz = TZ))
+  .m  <- as.numeric(difftime(Sys.time(), .ts, units = "mins"))
+  last_run_lbl <- if (is.na(.m)) {
+    format(.r$date, "%b %d")
+  } else if (.m < 90) {
+    paste0(max(0, round(.m)), " min ago")
+  } else if (.m < 36 * 60) {
+    paste0(round(.m / 60), " hr ago")
+  } else {
+    .d <- round(.m / 1440)
+    paste0(.d, if (.d == 1) " day ago" else " days ago")
+  }
+}
+
 # ── Leakage rate + sparkline data (rolling regression per rain event) ─────────
 leak_rate    <- NA_real_
 leak_spark   <- NULL
@@ -178,7 +219,7 @@ if (!is.null(daily) && "is_rain_day" %in% names(daily)) {
 #| title: "State of Charge"
 list(
   icon  = "battery-half",
-  color = "primary",
+  color = band_hi(latest_power$soc, good = 70, ok = 40),
   value = fmt(latest_power$soc, "%", 0)
 )
 ```
@@ -188,7 +229,7 @@ list(
 #| title: "House Voltage"
 list(
   icon  = "lightning-charge",
-  color = "primary",
+  color = band_hi(latest_power$voltage, good = 12.4, ok = 12.0),
   value = fmt(latest_power$voltage, "V", 2)
 )
 ```
@@ -198,7 +239,7 @@ list(
 #| title: "Starter Voltage"
 list(
   icon  = "key-fill",
-  color = "primary",
+  color = band_hi(latest_power$starter_v, good = 12.4, ok = 12.0),
   value = fmt(latest_power$starter_v, "V", 2)
 )
 ```
@@ -210,7 +251,7 @@ list(
 #| title: "Bilge Runs (24h)"
 runs_24h <- if (nrow(pump_raw) > 0)
   sum(pump_raw$date >= (Sys.Date() - 1)) else 0
-list(icon = "droplet", color = "info", value = runs_24h)
+list(icon = "droplet", color = band_runs(runs_24h, days = 1), value = runs_24h)
 ```
 
 ```{r}
@@ -218,17 +259,15 @@ list(icon = "droplet", color = "info", value = runs_24h)
 #| title: "Bilge Runs (7d)"
 runs_7d <- if (nrow(pump_raw) > 0)
   sum(pump_raw$date >= (Sys.Date() - 6)) else 0
-list(icon = "droplet-fill", color = "info", value = runs_7d)
+list(icon = "droplet-fill", color = band_runs(runs_7d, days = 7), value = runs_7d)
 ```
 
 ```{r}
 #| content: valuebox
 #| title: "Last Bilge Run"
-last_run <- if (nrow(pump_raw) > 0) {
-  r <- pump_raw |> arrange(date, start_t) |> slice_tail(n = 1)
-  paste0(format(r$date, "%b %d"), " ", substr(r$start_t, 1, 5))
-} else "\u2014"
-list(icon = "clock-history", color = "info", value = last_run)
+list(icon = "clock-history",
+     color = if (nrow(pump_raw) > 0) "info" else "secondary",
+     value = last_run_lbl)
 ```
 
 ## Row {height=66%}

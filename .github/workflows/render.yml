@@ -40,6 +40,12 @@ concurrency:
 jobs:
   render:
     runs-on: ubuntu-latest
+    # Without a UTF-8 locale, R writes non-ASCII characters as literal escapes
+    # ("<U+2014>" instead of an em dash) into both the HTML and the plot images.
+    # Pinning it here makes the render independent of the runner's defaults.
+    env:
+      LANG: C.UTF-8
+      LC_ALL: C.UTF-8
     steps:
       - name: Checkout
         uses: actions/checkout@v4
