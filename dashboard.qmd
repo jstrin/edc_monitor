@@ -8,6 +8,15 @@ execute:
   echo: false
   warning: false
   message: false
+knitr:
+  opts_chunk:
+    # Paint the graphics device the dashboard background colour, so composed
+    # (patchwork) plots don't render on a white canvas.
+    dev.args:
+      bg: "#0d1b2a"
+    # Render oversized and scale down in CSS — keeps charts crisp when they
+    # stretch to the full card width.
+    dpi: 150
 ---
 
 ```{r setup}
@@ -162,7 +171,7 @@ if (!is.null(daily) && "is_rain_day" %in% names(daily)) {
 
 # Overview
 
-## Row {height=22%}
+## Row {height=17%}
 
 ```{r}
 #| content: valuebox
@@ -188,13 +197,13 @@ list(
 #| content: valuebox
 #| title: "Starter Voltage"
 list(
-  icon  = "car-front",
+  icon  = "key-fill",
   color = "primary",
   value = fmt(latest_power$starter_v, "V", 2)
 )
 ```
 
-## Row {height=22%}
+## Row {height=17%}
 
 ```{r}
 #| content: valuebox
@@ -222,15 +231,15 @@ last_run <- if (nrow(pump_raw) > 0) {
 list(icon = "clock-history", color = "info", value = last_run)
 ```
 
-## Row {height=56%}
+## Row {height=66%}
 
 ### Column {width=40%}
 
 ::: {.card title="Leakage Rate Trend"}
 
 ```{r}
-#| fig-height: 2.6
-#| fig-width: 5
+#| fig-height: 3.8
+#| fig-width: 5.5
 
 if (!is.na(leak_rate) && !is.null(leak_spark) && length(leak_spark) >= 2) {
   spark_df <- tibble(x = seq_along(leak_spark), y = leak_spark)
@@ -271,7 +280,7 @@ Cycles per inch of rain. Rising trend indicates worsening bow ingress.
 if (nrow(pump_raw) > 0) {
   pump_raw |>
     arrange(desc(date), desc(start_t)) |>
-    slice_head(n = 8) |>
+    slice_head(n = 14) |>
     mutate(Duration = paste0(duration, "s")) |>
     transmute(Date = format(date, "%b %d"),
               Start = substr(start_t, 1, 8),
@@ -283,6 +292,31 @@ if (nrow(pump_raw) > 0) {
 }
 ```
 
+```{r}
+#| output: asis
+# Render timestamp lives in the navbar (top right) so it is visible on every
+# page. Emits only a <script>; nothing is drawn in this card.
+# ASCII only — a literal "·" here renders as "<U+00B7>" under a non-UTF-8 locale.
+.stamp <- format(with_tz(Sys.time(), TZ), "%b %d, %Y %H:%M %Z")
+cat(sprintf(
+'<script>
+(function () {
+  var s = "Updated %s";
+  function place() {
+    var n = document.querySelector(".navbar .navbar-container");
+    if (!n || n.querySelector(".navbar-updated")) return;
+    var e = document.createElement("span");
+    e.className = "navbar-updated";
+    e.textContent = s;
+    n.appendChild(e);
+  }
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", place);
+  } else { place(); }
+})();
+</script>', .stamp))
+```
+
 :::
 
 # Bilge Pump
@@ -292,8 +326,8 @@ if (nrow(pump_raw) > 0) {
 ::: {.card title="Rainfall + Bilge Pump Cycles"}
 
 ```{r}
-#| fig-height: 5
-#| fig-width: 12
+#| fig-height: 4.0
+#| fig-width: 16
 
 if (!is.null(daily) && nrow(daily) > 0 && "rainfall_in" %in% names(daily)) {
   n <- nrow(daily)
@@ -303,12 +337,14 @@ if (!is.null(daily) && nrow(daily) > 0 && "rainfall_in" %in% names(daily)) {
     geom_col(aes(y = rainfall_in,
                  fill = if_else(is_rain_day, "Rain", "Dry")),
              width = 0.7, alpha = 0.9) +
+    # Dry days are 0-height bars, so the legend swatch carried no information
+    # and cost vertical space — the subtitle already explains the colours.
     scale_fill_manual(name = NULL,
-                      values = c("Rain" = C$rain, "Dry" = C$dryday)) +
+                      values = c("Rain" = C$rain, "Dry" = C$dryday),
+                      guide = "none") +
     scale_x_date(date_labels = "%b %d", date_breaks = brk) +
     scale_y_continuous(expand = expansion(mult = c(0, 0.1))) +
-    labs(title = "Rainfall + Bilge Pump Cycles",
-         subtitle = "Blue = rain \u2022 Orange = pump cycles \u2022 \u2715 = dry day / no cycles",
+    labs(subtitle = "Blue = rain \u2022 Orange = pump cycles \u2022 \u2715 = dry day / no cycles",
          y = "Rain (in)", x = NULL) +
     plot_theme +
     theme(axis.text.x = element_blank(), legend.position = "top")
@@ -323,7 +359,13 @@ if (!is.null(daily) && nrow(daily) > 0 && "rainfall_in" %in% names(daily)) {
     labs(y = "Cycles", x = NULL) +
     plot_theme
 
-  p_rain / p_cyc + plot_layout(heights = c(2, 3))
+  # plot_annotation() is what paints the *composition* background — without it
+  # patchwork draws the assembled plot on white regardless of the device bg.
+  p_rain / p_cyc +
+    plot_layout(heights = c(2, 3)) +
+    plot_annotation(theme = theme(
+      plot.background = element_rect(fill = C$bg, color = NA),
+      plot.margin     = margin(2, 2, 2, 2)))
 } else {
   ggplot() + annotate("text", x = 0.5, y = 0.5,
     label = "No bilge data yet", color = C$muted, size = 6) +
@@ -339,8 +381,8 @@ if (!is.null(daily) && nrow(daily) > 0 && "rainfall_in" %in% names(daily)) {
 ::: {.card title="Cycles vs. Rainfall"}
 
 ```{r}
-#| fig-height: 4
-#| fig-width: 12
+#| fig-height: 4.0
+#| fig-width: 16
 
 if (!is.null(daily) && "is_rain_day" %in% names(daily)) {
   rd <- daily |> filter(is_rain_day %in% TRUE)
@@ -351,16 +393,17 @@ if (!is.null(daily) && "is_rain_day" %in% names(daily)) {
                   alpha = 0.15, linewidth = 0.8) +
       geom_point(aes(color = as.numeric(date)), size = 4, alpha = 0.9) +
       scale_color_gradient(low = C$line, high = C$cycle,
-        name = "Date",
-        labels = \(x) format(as.Date(x, origin = "1970-01-01"), "%b %d")) +
+        name = "Date", n.breaks = 4,
+        labels = \(x) format(as.Date(x, origin = "1970-01-01"), "%b %d"),
+        guide = guide_colorbar(barheight = 8, barwidth = 0.5)) +
       annotate("text", x = Inf, y = Inf,
         label = paste0("Slope: ", round(coef(fit)[2], 1),
                        " cyc/in\nR\u00b2 = ", round(summary(fit)$r.squared, 2)),
         color = C$green, hjust = 1.05, vjust = 1.3, size = 4) +
-      labs(title = "Cycles vs. Rainfall (rain days only)",
-           subtitle = "Steepening slope \u2192 worsening ingress",
+      labs(subtitle = "Rain days only \u2022 steepening slope \u2192 worsening ingress",
            x = "Rainfall (inches)", y = "Pump cycles") +
-      plot_theme
+      plot_theme +
+      theme(legend.position = "right")
   } else {
     ggplot() + annotate("text", x = 0.5, y = 0.5,
       label = paste0("Need \u2265 2 rain events (", nrow(rd), " so far)"),
@@ -380,8 +423,8 @@ if (!is.null(daily) && "is_rain_day" %in% names(daily)) {
 ::: {.card title="Battery Voltage — with ACR state"}
 
 ```{r}
-#| fig-height: 4.5
-#| fig-width: 12
+#| fig-height: 4.2
+#| fig-width: 16
 
 if (nrow(power_raw) > 0) {
   cutoff <- Sys.time() - 7 * 86400
@@ -428,8 +471,7 @@ if (nrow(power_raw) > 0) {
     scale_color_manual(name = NULL,
                        values = c("House" = C$blue, "Starter" = C$cycle)) +
     scale_x_datetime(date_labels = "%b %d", date_breaks = "1 day") +
-    labs(title = "Battery Voltage — last 7 days",
-         subtitle = "House vs. starter \u2022 shaded = ACR combined (inferred)",
+    labs(subtitle = "House vs. starter \u2022 shaded = ACR combined (inferred)",
          x = NULL, y = "Volts") +
     plot_theme
 } else {
@@ -449,8 +491,8 @@ if (nrow(power_raw) > 0) {
 ::: {.card title="State of Charge — 7 days"}
 
 ```{r}
-#| fig-height: 3.5
-#| fig-width: 6
+#| fig-height: 3.6
+#| fig-width: 8
 
 if (nrow(power_raw) > 0) {
   d <- power_raw |> filter(timestamp >= Sys.time() - 7*86400, !is.na(soc))
@@ -460,7 +502,7 @@ if (nrow(power_raw) > 0) {
       geom_line(color = C$blue, linewidth = 0.8) +
       scale_x_datetime(date_labels = "%b %d", date_breaks = "1 day") +
       scale_y_continuous(limits = c(0, 100), breaks = seq(0, 100, 20)) +
-      labs(title = "State of Charge", x = NULL, y = "SOC (%)") +
+      labs(x = NULL, y = "SOC (%)") +
       plot_theme
   }
 }
@@ -473,8 +515,8 @@ if (nrow(power_raw) > 0) {
 ::: {.card title="Current — 24 hours"}
 
 ```{r}
-#| fig-height: 3.5
-#| fig-width: 6
+#| fig-height: 3.6
+#| fig-width: 8
 
 if (nrow(power_raw) > 0) {
   d <- power_raw |> filter(timestamp >= Sys.time() - 24*3600, !is.na(current))
@@ -486,20 +528,10 @@ if (nrow(power_raw) > 0) {
       scale_fill_manual(values = c("TRUE" = C$green, "FALSE" = C$cycle),
                         guide = "none") +
       scale_x_datetime(date_labels = "%H:%M", date_breaks = "3 hours") +
-      labs(title = "Current", subtitle = "Positive = charging",
-           x = NULL, y = "Amps") +
+      labs(subtitle = "Positive = charging", x = NULL, y = "Amps") +
       plot_theme
   }
 }
 ```
 
 :::
-
-## Row {height=8%}
-
-```{r}
-#| content: valuebox
-#| title: "Last Updated"
-list(icon = "arrow-repeat", color = "secondary",
-     value = format(with_tz(Sys.time(), TZ), "%b %d %H:%M %Z"))
-```
