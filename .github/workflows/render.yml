@@ -13,7 +13,7 @@ name: Render and Deploy Dashboard
 on:
   schedule:
     # Every 30 min from 13:00 to 21:30 UTC (9:00 AM – 5:30 PM EDT)
-    - cron: "0,30 13-21 * * *"
+    - cron: "8,38 13-21 * * *"
     # 22:00 UTC (6:00 PM EDT)
     - cron: "0 22 * * *"
     # 02:00 UTC (10:00 PM EDT)
