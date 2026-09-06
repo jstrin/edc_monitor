@@ -1,28 +1,20 @@
 name: Render and Deploy Dashboard
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Schedule is UTC. Boat is in the water during EDT (UTC-4), so these are set
-# for EDT and will shift by one hour under EST — which is fine, boat is hauled
-# out by then.
+# Rendering cadence is driven EXTERNALLY. An always-on Debian thin client on
+# the home LAN ('wallcal') runs a local-time cron that calls the
+# workflow_dispatch API on a reliable schedule: every 30 min from 9:00 AM to
+# 6:00 PM EDT, plus 10:00 PM and 6:00 AM.
 #
-# Desired local (EDT):
-#   Every 30 min, 9:00 AM – 6:00 PM  →  13:00–22:00 UTC
-#   Plus 10:00 PM EDT (02:00 UTC next day) and 6:00 AM EDT (10:00 UTC)
+# GitHub's own `schedule:` cron was throttled on the free tier — firing roughly
+# once every few hours instead of on time — so it has been removed. The trigger
+# script, fine-grained-PAT setup and crontab live in deploy/README.md.
 # ─────────────────────────────────────────────────────────────────────────────
 
 on:
-  schedule:
-    # Every 30 min from 13:00 to 21:30 UTC (9:00 AM – 5:30 PM EDT)
-    - cron: "8,38 13-21 * * *"
-    # 22:00 UTC (6:00 PM EDT)
-    - cron: "0 22 * * *"
-    # 02:00 UTC (10:00 PM EDT)
-    - cron: "0 2 * * *"
-    # 10:00 UTC (6:00 AM EDT)
-    - cron: "0 10 * * *"
-  # Allow manual triggering from the Actions tab
+  # Primary trigger: the external 'wallcal' cron (see deploy/README.md).
   workflow_dispatch:
-  # Render on push to main (so config changes deploy immediately)
+  # Render on push to main (so config changes deploy immediately).
   push:
     branches: [main]
 
