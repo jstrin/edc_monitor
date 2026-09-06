@@ -61,3 +61,30 @@ min/month, well under the limit.
 
 The Google Sheet must remain shared as "Anyone with the link → Viewer" for the
 public fetch to work. No API key or secret is stored anywhere.
+
+## Follow-ups
+
+Open items for the render pipeline, in priority order:
+
+1. **Monitor for a silent trigger stall.** The fine-grained PAT on the `wallcal`
+   box expires; when it does, the trigger fails with `HTTP 401` into a tmpfs log
+   nobody watches, and renders quietly stop. The dashboard navbar shows its last
+   render time, so a stale page is visible to anyone looking — but nothing
+   actively alerts. Best fix: a dead-man's-switch check (e.g. healthchecks.io,
+   free tier) — one added line in `deploy/wallcal-edc-trigger.py` to ping a URL
+   on a successful dispatch, with the service alerting when a ping is missed.
+   That covers token expiry, box offline, cron disabled and dead network in one
+   go. Until it's in place: record the PAT expiry date and rotate a week ahead.
+
+2. **Concurrency can back renders up.** `render.yml` uses `concurrency: pages`
+   with `cancel-in-progress: false`. With ~1-minute cached renders on a
+   30-minute trigger this is fine, but if a render runs long (a cold R-package
+   cache is ~4 min, or a slow runner) dispatches queue and you get
+   cancelled-run cascades plus delayed deploys. No change needed now — just
+   recognise the pattern if cancelled runs start piling up.
+
+3. **Housekeeping.**
+   - A cluster of manual `workflow_dispatch` runs around 2026-09-06 is from
+     building and testing the trigger — harmless.
+   - `/etc/fstab.bak-20260906` on the `wallcal` box is a backup from switching
+     `/` to `noatime`; safe to delete once the mount is confirmed good.
